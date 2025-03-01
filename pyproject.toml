@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pgalchemy"
-version = "0.1.5"
+version = "0.1.6"
 description = ""
 authors = ["Matthew Beatty <beattyml1@gmail.com>"]
 readme = "README.md"
