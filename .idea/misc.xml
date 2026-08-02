@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Poetry (pg_rls_sqlalchemy)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Poetry (pg_rls_sqlalchemy)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Poetry (pgalchemy)" project-jdk-type="Python SDK" />
 </project>
