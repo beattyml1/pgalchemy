@@ -1,9 +1,15 @@
 from alembic.operations import MigrateOperation, Operations
 
 
+def _qualified(operation) -> str:
+    if operation.schema is not None:
+        return "%s.%s" % (operation.schema, operation.table_name)
+    return operation.table_name
+
+
 @Operations.register_operation("grant_column")
 class ColGrantOp(MigrateOperation):
-    """Enable RLS on a table."""
+    """Grant a privilege on a single column to a role."""
 
     def __init__(self, table_name, operation, column, role, schema=None):
         self.role = role
@@ -13,20 +19,21 @@ class ColGrantOp(MigrateOperation):
         self.schema = schema
 
     @classmethod
-    def grant_column(cls, operations, table_name, **kw):
-        """Issue a "ALTER TABLE ENABLE ROW LEVEL SECURITY" instruction."""
-
-        op = ColRevokeOp(table_name, **kw)
+    def grant_column(cls, operations, table_name, operation, column, role, **kw):
+        """Issue a "GRANT <priv> (<column>) ON <table> TO <role>" instruction."""
+        op = ColGrantOp(table_name, operation, column, role, **kw)
         return operations.invoke(op)
 
     def reverse(self):
         # only needed to support autogenerate
-        return ColRevokeOp(self.table_name, self.operation, self.column, self.role, schema=self.schema)
+        return ColRevokeOp(
+            self.table_name, self.operation, self.column, self.role, schema=self.schema
+        )
 
 
 @Operations.register_operation("revoke_column")
 class ColRevokeOp(MigrateOperation):
-    """Disable RLS on table."""
+    """Revoke a privilege on a single column from a role."""
 
     def __init__(self, table_name, operation, column, role, schema=None):
         self.role = role
@@ -36,28 +43,41 @@ class ColRevokeOp(MigrateOperation):
         self.schema = schema
 
     @classmethod
-    def revoke_column(cls, operations, sequence_name, **kw):
-        """Issue a "ALTER TABLE DISABLE ROW LEVEL SECURITY" instruction."""
-
-        op = ColGrantOp(sequence_name, **kw)
+    def revoke_column(cls, operations, table_name, operation, column, role, **kw):
+        """Issue a "REVOKE <priv> (<column>) ON <table> FROM <role>" instruction."""
+        op = ColRevokeOp(table_name, operation, column, role, **kw)
         return operations.invoke(op)
 
     def reverse(self):
         # only needed to support autogenerate
-        return ColGrantOp(self.table_name, self.operation, self.column, self.role, schema=self.schema)
+        return ColGrantOp(
+            self.table_name, self.operation, self.column, self.role, schema=self.schema
+        )
+
+
+def grant_column_sql(operation: ColGrantOp) -> str:
+    return "GRANT %s (%s) ON %s TO %s;" % (
+        operation.operation,
+        operation.column,
+        _qualified(operation),
+        operation.role,
+    )
+
+
+def revoke_column_sql(operation: ColRevokeOp) -> str:
+    return "REVOKE %s (%s) ON %s FROM %s;" % (
+        operation.operation,
+        operation.column,
+        _qualified(operation),
+        operation.role,
+    )
+
 
 @Operations.implementation_for(ColGrantOp)
 def grant_column(operations, operation: ColGrantOp):
-    if operation.schema is not None:
-        name = "%s.%s" % (operation.schema, operation.table_name)
-    else:
-        name = operation.table_name
-    operations.execute("REVOKE %s (%s) on %s;" % operation.operation, operation.column, name, operation.role)
+    operations.execute(grant_column_sql(operation))
+
 
 @Operations.implementation_for(ColRevokeOp)
 def revoke_column(operations, operation: ColRevokeOp):
-    if operation.schema is not None:
-        name = "%s.%s" % (operation.schema, operation.table_name)
-    else:
-        name = operation.table_name
-    operations.execute("REVOKE %s (%s) on %s to %s;" % operation.operation, operation.column, name, operation.role)
+    operations.execute(revoke_column_sql(operation))
