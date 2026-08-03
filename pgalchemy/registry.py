@@ -78,6 +78,10 @@ class Registry:
         self.policies: Dict[TableKey, Dict[str, "Policy"]] = {}
         self.functions: List["Function"] = []
         self.views: List["View"] = []
+        # Policy declarations made against an abstract base's column, which have
+        # no table yet. Expanded per concrete subclass -- see
+        # ``pgalchemy.permission_patterns``.
+        self.patterns: List[Any] = []
 
     # -- row level security -------------------------------------------------
     def register_rls(self, target: Any, data: "RlsData") -> "RlsData":
@@ -109,6 +113,11 @@ class Registry:
         for by_name in self.policies.values():
             yield from by_name.values()
 
+    # -- deferred patterns --------------------------------------------------
+    def register_pattern(self, pattern: Any) -> Any:
+        self.patterns.append(pattern)
+        return pattern
+
     # -- functions & views --------------------------------------------------
     def register_function(self, function: "Function") -> "Function":
         self.functions.append(function)
@@ -138,6 +147,7 @@ class Registry:
         self.policies.clear()
         self.functions.clear()
         self.views.clear()
+        self.patterns.clear()
 
 
 registry = Registry()

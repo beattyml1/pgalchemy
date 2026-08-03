@@ -4,13 +4,15 @@ from __future__ import annotations
 import re
 
 import pytest
-from sqlalchemy import Boolean, Column, Integer, String, literal_column
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, literal_column
 from sqlalchemy.orm import declarative_base
 
 from pgalchemy import PolicyCommands, PolicyType
 from pgalchemy.config import config_value
 from pgalchemy.permission_patterns import (
+    DeferredMatch,
     default_policy_name_format,
+    patterns_for,
     policy_require_match,
 )
 from pgalchemy.registry import registry
@@ -306,3 +308,259 @@ def test_two_columns_on_one_table_do_not_collide(Model):
     policy_require_match(Model.title, config_value("app.title"))
 
     assert len(registry.get_policies(Model)) == 8
+
+
+# -- declaring against an abstract base ----------------------------------------
+
+
+def test_abstract_base_applies_to_every_concrete_subclass():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Doc(Owned):
+        __tablename__ = "docs"
+        id = Column(Integer, primary_key=True)
+
+    class Note(Owned):
+        __tablename__ = "notes"
+        id = Column(Integer, primary_key=True)
+
+    assert {p.name for p in registry.get_policies(Doc)} == {
+        "pol_docs_owner_id_select",
+        "pol_docs_owner_id_insert",
+        "pol_docs_owner_id_update",
+        "pol_docs_owner_id_delete",
+    }
+    assert len(registry.get_policies(Note)) == 4
+    assert "notes.owner_id" in by_command(Note)[PolicyCommands.SELECT].using
+
+
+def test_models_defined_before_the_declaration_are_swept():
+    """Declaration order must not matter -- a model imported before the pattern
+    is declared would otherwise be silently unprotected."""
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    class Early(Owned):
+        __tablename__ = "early"
+        id = Column(Integer, primary_key=True)
+
+    assert registry.get_policies(Early) == []
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    assert len(registry.get_policies(Early)) == 4
+
+
+def test_plain_mixin_works_as_well_as_an_abstract_base():
+    Base = declarative_base()
+
+    class OwnedMixin:
+        owner_id = Column(Integer)
+
+    policy_require_match(OwnedMixin.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Doc(OwnedMixin, Base):
+        __tablename__ = "docs_mixin"
+        id = Column(Integer, primary_key=True)
+
+    assert len(registry.get_policies(Doc)) == 4
+
+
+def test_concrete_column_still_applies_immediately(Model):
+    """The public function keeps the original behaviour for a bound column."""
+    result = policy_require_match(Model.owner_id, config_value("app.user_id").cast(Integer))
+
+    assert result is None
+    assert len(registry.get_policies(Model)) == 4
+    assert registry.patterns == []
+
+
+def test_deferring_returns_and_registers_the_pattern():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    pattern = policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    assert isinstance(pattern, DeferredMatch)
+    assert pattern in registry.patterns
+
+
+def test_pattern_is_recorded_on_the_declaring_class():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    pattern = policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Doc(Owned):
+        __tablename__ = "docs_owner"
+        id = Column(Integer, primary_key=True)
+
+    assert Owned.__dict__["__pgalchemy_patterns__"] == [pattern]
+    assert patterns_for(Doc) == [pattern]
+    assert pattern.owner is Owned
+
+
+def test_patterns_accumulate_from_several_bases():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    class Tenanted(Owned):
+        __abstract__ = True
+        tenant_id = Column(Integer)
+
+    owner_pattern = policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+    tenant_pattern = policy_require_match(Tenanted.tenant_id, config_value("app.tenant").cast(Integer))
+
+    class Doc(Tenanted):
+        __tablename__ = "docs_both"
+        id = Column(Integer, primary_key=True)
+
+    assert set(patterns_for(Doc)) == {owner_pattern, tenant_pattern}
+    assert len(registry.get_policies(Doc)) == 8
+    # the declaring class keeps only its own, never its parent's
+    assert Owned.__dict__["__pgalchemy_patterns__"] == [owner_pattern]
+    assert Tenanted.__dict__["__pgalchemy_patterns__"] == [tenant_pattern]
+
+
+def test_unnamed_column_is_matched_by_identity_not_name():
+    """``Column(Integer)`` on an abstract base has ``name is None`` until it is
+    copied onto a subclass's table, so name lookup cannot work."""
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    assert Owned.owner_id.name is None
+    assert Owned.owner_id.table is None
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Doc(Owned):
+        __tablename__ = "docs_ident"
+        id = Column(Integer, primary_key=True)
+
+    assert "pol_docs_ident_owner_id_select" in {p.name for p in registry.get_policies(Doc)}
+
+
+def test_explicitly_named_column_resolves_to_that_name():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner = Column("owner_id", Integer)
+
+    policy_require_match(Owned.owner, config_value("app.user_id").cast(Integer))
+
+    class Doc(Owned):
+        __tablename__ = "docs_named"
+        id = Column(Integer, primary_key=True)
+
+    assert "pol_docs_named_owner_id_select" in {p.name for p in registry.get_policies(Doc)}
+
+
+def test_options_carry_through_to_every_subclass():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    policy_require_match(
+        Owned.owner_id,
+        config_value("app.user_id").cast(Integer),
+        override=literal_column("current_user = 'admin'"),
+        policy_type=PolicyType.RESTRICTIVE,
+    )
+
+    class Doc(Owned):
+        __tablename__ = "docs_opts"
+        id = Column(Integer, primary_key=True)
+
+    for policy in registry.get_policies(Doc):
+        assert policy.as_ is PolicyType.RESTRICTIVE
+        assert "current_user = 'admin'" in (policy.using or policy.with_check)
+
+
+def test_unrelated_models_are_untouched():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Unrelated(Base):
+        __tablename__ = "unrelated"
+        id = Column(Integer, primary_key=True)
+        owner_id = Column(Integer)  # same name, different declaration
+
+    assert registry.get_policies(Unrelated) == []
+
+
+def test_joined_table_child_without_the_column_is_skipped():
+    """The child's own table has no owner_id, so there is nothing to match on.
+    Note this leaves the child table itself unprotected against a direct
+    ``SELECT * FROM mgr`` -- ORM queries filter via the join to the parent."""
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Emp(Owned):
+        __tablename__ = "emp"
+        id = Column(Integer, primary_key=True)
+        kind = Column(String(20))
+        __mapper_args__ = {"polymorphic_on": kind, "polymorphic_identity": "emp"}
+
+    class Mgr(Emp):
+        __tablename__ = "mgr"
+        id = Column(Integer, ForeignKey("emp.id"), primary_key=True)
+        __mapper_args__ = {"polymorphic_identity": "mgr"}
+
+    assert len(registry.get_policies(Emp)) == 4
+    assert registry.get_policies(Mgr) == []
+
+
+def test_single_table_inheritance_does_not_duplicate():
+    Base = declarative_base()
+
+    class Owned(Base):
+        __abstract__ = True
+        owner_id = Column(Integer)
+
+    policy_require_match(Owned.owner_id, config_value("app.user_id").cast(Integer))
+
+    class Item(Owned):
+        __tablename__ = "items"
+        id = Column(Integer, primary_key=True)
+        kind = Column(String(20))
+        __mapper_args__ = {"polymorphic_on": kind, "polymorphic_identity": "item"}
+
+    class Special(Item):
+        __mapper_args__ = {"polymorphic_identity": "special"}
+
+    assert len(registry.get_policies(Item)) == 4
+    assert len(registry.get_policies(Special)) == 4  # same table, deduped by name
