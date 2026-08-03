@@ -33,6 +33,7 @@ def isolate_registry():
     saved_policies = {key: dict(value) for key, value in registry.policies.items()}
     saved_functions = list(registry.functions)
     saved_views = list(registry.views)
+    saved_patterns = list(registry.patterns)
     saved_combos = list(cls_module._cls_registry)
 
     yield registry
@@ -43,6 +44,7 @@ def isolate_registry():
     registry.policies.update(saved_policies)
     registry.functions[:] = saved_functions
     registry.views[:] = saved_views
+    registry.patterns[:] = saved_patterns
     cls_module._cls_registry[:] = saved_combos
 
 
