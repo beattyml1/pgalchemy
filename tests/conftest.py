@@ -34,6 +34,8 @@ def isolate_registry():
     saved_functions = list(registry.functions)
     saved_views = list(registry.views)
     saved_patterns = list(registry.patterns)
+    saved_control = list(registry.control_policies)
+    saved_exceptions = {key: list(value) for key, value in registry.control_exceptions.items()}
     saved_combos = list(cls_module._cls_registry)
 
     yield registry
@@ -45,6 +47,9 @@ def isolate_registry():
     registry.functions[:] = saved_functions
     registry.views[:] = saved_views
     registry.patterns[:] = saved_patterns
+    registry.control_policies[:] = saved_control
+    registry.control_exceptions.clear()
+    registry.control_exceptions.update(saved_exceptions)
     cls_module._cls_registry[:] = saved_combos
 
 

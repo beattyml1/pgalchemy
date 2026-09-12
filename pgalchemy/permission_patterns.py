@@ -231,7 +231,7 @@ def policy_require_match(
 
     pattern = DeferredMatch(column, options)
     registry.register_pattern(pattern)
-    for class_, table in _mapped_classes():
+    for class_, table in mapped_classes():
         pattern.apply_to(class_, table)
     return pattern
 
@@ -246,7 +246,7 @@ def patterns_for(class_: type) -> List[DeferredMatch]:
     return found
 
 
-def _mapped_classes() -> List[Tuple[type, Table]]:
+def mapped_classes() -> List[Tuple[type, Table]]:
     """Already-mapped classes and their local tables.
 
     Reads the class managers rather than ``registry.mappers`` so that declaring

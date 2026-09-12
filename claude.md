@@ -24,6 +24,8 @@ pgalchemy/
 │   ├── domains.py      # Domain support
 │   ├── cls.py          # Column-level security
 │   ├── registry.py     # Central registry of every declaration
+│   ├── schema_control.py    # Schema control policies (the validation framework)
+│   ├── control_policies.py  # The control policies shipped with the library
 │   └── alembic/        # Alembic integration
 │       ├── comparator.py       # Comparators + renderers for migrations
 │       ├── column_privilege.py # Reading column privileges from the DB
@@ -70,7 +72,21 @@ The library provides two approaches for implementing RLS:
 - Can use Python expressions or SQL files
 - Schema support
 
-### 5. Alembic Integration
+### 5. Schema Control Policies
+- Project-wide guardrails over declared permissioning, modelled on AWS Service Control
+  Policies: a `Policy` is the IAM policy (grants on one resource), a schema control policy
+  is the SCP (attaches to a schema, governs every table in it, can only refuse)
+- Declared with `@schema_control_policy(on="public")`; the body receives a
+  `ControlledTable` aggregating RLS flags, policies and column privileges for one table
+- Exemptions from both directions: `exempt=` on the policy, `@schema_control_exception`
+  on the model (which requires a `reason`, reported rather than swallowed)
+- Six built-ins in `pgalchemy/control_policies.py`, attached with `use_recommended()`
+- Evaluated by `evaluate_control_policies(metadata)`, or during autogenerate with
+  `register_entities(control_policies=True)`
+- `security_review(metadata)` returns exemptions + warnings + the policies in force as
+  a plain dict, for a snapshot test a security team reviews as a diff
+
+### 6. Alembic Integration
 - Custom comparators for detecting RLS, policy and column-privilege changes
 - Operations for enabling/disabling/forcing RLS
 - Operations for creating/dropping policies and column grants
@@ -95,6 +111,11 @@ The library provides two approaches for implementing RLS:
   schema-level comparator as soon as it is imported and, with an empty registry, emits a
   drop for every entity it finds in the database -- which would revert pgalchemy's own
   policies and grants. See `pgalchemy/alembic/__init__.py`.
+
+- **Schema control policies emit no SQL.** They are the only thing in the library that
+  describes no database object. A control policy's sole power is to refuse, which is why
+  the autogenerate hook raises rather than appending operations, and why it stays inert
+  until `register_entities(control_policies=True)` asks for it.
 
 - **Policy change detection round-trips through the database.** PostgreSQL rewrites
   policy expressions when it stores them, so `pgalchemy/alembic/policy_state.py`

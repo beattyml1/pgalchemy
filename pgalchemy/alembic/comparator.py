@@ -13,6 +13,7 @@ from sqlalchemy import Column, Table, text
 from ..cls import ColumnSecurityRule, column_is_managed, column_rules
 from ..registry import registry
 from ..rls import RlsData
+from ..schema_control import evaluate_control_policies
 from .column_privilege import ColumnPrivilege
 from .operations import (
     ColGrantOp,
@@ -319,3 +320,47 @@ def compare_cls_enabled(
                     schema=schemaname,
                 )
             )
+
+
+# --------------------------------------------------------------------------
+# Schema control policies -- refuse to generate a migration for a schema that
+# fails its guardrails
+# --------------------------------------------------------------------------
+
+#: Set by ``register_entities(control_policies=True)``. Off by default: a
+#: comparator that can abort autogenerate must be asked for.
+_enforce_control_policies = False
+
+
+def enforce_control_policies(enabled: bool = True) -> None:
+    """Make ``revision --autogenerate`` fail on a control policy violation."""
+    global _enforce_control_policies
+    _enforce_control_policies = enabled
+
+
+@comparators.dispatch_for("schema")
+def evaluate_control_policies_for_schema(autogen_context, upgrade_ops, schemas):
+    """Evaluate every schema control policy, once per autogenerate run.
+
+    The schema dispatch point is the right one here because control policies
+    attach to a schema rather than a table, and because it is called once with
+    the whole metadata rather than per table -- a policy about "every table"
+    cannot be answered a table at a time.
+
+    Unlike the comparators above this one raises rather than degrading quietly.
+    That is deliberate and is the entire point of the feature: a control policy
+    emits no operations and its only power is to refuse. It stays inert until
+    ``register_entities(control_policies=True)`` asks for it, so nothing here
+    can surprise an existing project.
+
+    No database is consulted, so this works identically in offline ``--sql``
+    mode.
+    """
+    if not _enforce_control_policies:
+        return
+
+    metadata = getattr(autogen_context, "metadata", None)
+    if metadata is None:
+        return
+
+    evaluate_control_policies(metadata).raise_for_status()

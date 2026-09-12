@@ -19,6 +19,7 @@ from ..registry import registry
 # renderers for the operations below, so `import pgalchemy.alembic` is enough
 # to wire everything up.
 from . import comparator  # noqa: F401  (imported for its side effects)
+from .comparator import enforce_control_policies
 from .operations import (
     ColGrantOp,
     ColRevokeOp,
@@ -88,7 +89,10 @@ def allow_alembic_utils_defaults() -> None:
 
 
 def register_entities(
-    extra: Optional[Iterable] = None, include_policies: bool = False, **kwargs
+    extra: Optional[Iterable] = None,
+    include_policies: bool = False,
+    control_policies: bool = False,
+    **kwargs,
 ) -> List:
     """Hand pgalchemy's functions and views to ``alembic_utils``.
 
@@ -102,6 +106,12 @@ def register_entities(
     picks the functions and views up. RLS, policies and column privileges do
     not have this restriction because pgalchemy compares them itself.
 
+    ``control_policies=True`` additionally makes ``revision --autogenerate``
+    evaluate every declared schema control policy and abort on a violation,
+    rather than writing a migration for a schema that fails its own guardrails.
+    It is off by default because a comparator that can refuse to generate
+    anything should be asked for explicitly.
+
     ``entity_types`` defaults to the classes pgalchemy hands over. Left
     unrestricted, alembic_utils treats every entity it finds in the database as
     unmanaged and emits a drop for it -- including the policies and column
@@ -109,6 +119,8 @@ def register_entities(
     into alembic_utils' default of considering every type.
     """
     from alembic_utils.replaceable_entity import register_entities as _register
+
+    comparator.enforce_control_policies(control_policies)
 
     entity_types = kwargs.pop("entity_types", managed_entity_types())
     _set_alembic_utils_scope(entity_types or [_NoEntities])
@@ -136,6 +148,7 @@ __all__ = [
     "NoForceRlsOp",
     "allow_alembic_utils_defaults",
     "entities",
+    "enforce_control_policies",
     "managed_entity_types",
     "register_entities",
 ]

@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .functions import Function
     from .policy import Policy
     from .rls import RlsData
+    from .schema_control import Exemption, SchemaControlPolicy
     from .views import View
 
 TableKey = Tuple[Optional[str], str]
@@ -82,6 +83,11 @@ class Registry:
         # no table yet. Expanded per concrete subclass -- see
         # ``pgalchemy.permission_patterns``.
         self.patterns: List[Any] = []
+        # Schema-wide guardrails, and the per-table licences to ignore them.
+        # Unlike everything above these describe no object and emit no SQL --
+        # see ``pgalchemy.schema_control``.
+        self.control_policies: List["SchemaControlPolicy"] = []
+        self.control_exceptions: Dict[TableKey, List["Exemption"]] = {}
 
     # -- row level security -------------------------------------------------
     def register_rls(self, target: Any, data: "RlsData") -> "RlsData":
@@ -118,6 +124,17 @@ class Registry:
         self.patterns.append(pattern)
         return pattern
 
+    # -- schema control -----------------------------------------------------
+    def register_control_policy(self, policy: "SchemaControlPolicy") -> "SchemaControlPolicy":
+        self.control_policies.append(policy)
+        return policy
+
+    def register_control_exception(
+        self, key: TableKey, exemption: "Exemption"
+    ) -> "Exemption":
+        self.control_exceptions.setdefault(key, []).append(exemption)
+        return exemption
+
     # -- functions & views --------------------------------------------------
     def register_function(self, function: "Function") -> "Function":
         self.functions.append(function)
@@ -148,6 +165,8 @@ class Registry:
         self.functions.clear()
         self.views.clear()
         self.patterns.clear()
+        self.control_policies.clear()
+        self.control_exceptions.clear()
 
 
 registry = Registry()
