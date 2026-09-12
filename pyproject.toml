@@ -1,9 +1,11 @@
 [tool.poetry]
 name = "pgalchemy"
-version = "0.1.9"
-description = ""
+version = "0.2.0"
+description = "SQLAlchemy and Alembic support for PostgreSQL features like RLS, Policies, CLS, Config, Views, Functions, Domains, etc"
 authors = ["Matthew Beatty <beattyml1@gmail.com>"]
 readme = "README.md"
+homepage = "https://github.com/beattyml1/pgalchemy"
+repository = "https://github.com/beattyml1/pgalchemy"
 include = [{path="README.md"}, {path="LICENSE"}]
 packages = [
     { include = "pgalchemy", from = "." },

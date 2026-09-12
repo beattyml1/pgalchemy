@@ -28,6 +28,9 @@ from pgalchemy.alembic.operations import (
     ForceRlsOp,
     NoForceRlsOp,
 )
+from pgalchemy import SchemaControlViolation, schema_control_exception
+from pgalchemy.alembic.comparator import enforce_control_policies
+from pgalchemy.control_policies import rls_required
 from pgalchemy.registry import registry
 from tests.models import build_models
 
@@ -278,3 +281,55 @@ def test_column_grant_is_applied_to_the_database(connection, models):
     ).scalar()
 
     assert granted == 1
+
+
+class TestSchemaControlPolicies:
+    """The autogenerate guardrail: a failing schema produces no migration."""
+
+    @pytest.fixture(autouse=True)
+    def reset_enforcement(self):
+        # The flag is a module global, so it has to be put back or it leaks
+        # into every test that runs after this class.
+        yield
+        enforce_control_policies(False)
+
+    def test_autogenerate_aborts_when_a_control_policy_fails(self, connection, models):
+        enforce_control_policies(True)
+        rls_required(on=SCHEMA)
+
+        with pytest.raises(SchemaControlViolation) as excinfo:
+            upgrade_ops_for(connection, models.metadata)
+
+        # public_settings opted out with @rls(enabled=False).
+        assert f"{SCHEMA}.public_settings" in str(excinfo.value)
+        assert "row level security" in str(excinfo.value)
+
+    def test_an_exempted_table_lets_autogenerate_through(self, connection, models):
+        enforce_control_policies(True)
+        policy = rls_required(on=SCHEMA)
+        schema_control_exception(policy, reason="deliberately public")(models.PublicSetting)
+
+        upgrade_ops = upgrade_ops_for(connection, models.metadata)
+
+        assert any(isinstance(op, EnableRlsOp) for op in flatten(upgrade_ops.ops))
+
+    def test_enforcement_is_off_until_asked_for(self, connection, models):
+        rls_required(on=SCHEMA)
+
+        # No enforce_control_policies(True), so the failing policy is inert.
+        upgrade_ops_for(connection, models.metadata)
+
+    def test_register_entities_turns_enforcement_on(self, connection, models):
+        # Functions and views are dropped for this test only. register_entities
+        # also hands them to alembic_utils, which reaches the live database to
+        # interpret them -- and on a schema whose tables do not exist yet that
+        # fails for reasons that have nothing to do with control policies. The
+        # autouse isolate_registry fixture puts them back.
+        registry.functions.clear()
+        registry.views.clear()
+
+        pgalchemy.alembic.register_entities(control_policies=True)
+        rls_required(on=SCHEMA)
+
+        with pytest.raises(SchemaControlViolation):
+            upgrade_ops_for(connection, models.metadata)

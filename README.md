@@ -5,6 +5,7 @@ SQLAlchemy and Alembic support for PostgreSQL features like:
 - Row Level Security (RLS)
 - Policies
 - Column level privileges
+- Schema control policies -- project-wide guardrails over all of the above
 - Functions
 - Views and materialized views
 - Domains
@@ -299,6 +300,169 @@ from pgalchemy.domains import RegexValidatedTextDomain
 email = RegexValidatedTextDomain('email_address', Text, regex=r'^[^@]+@[^@]+\.[^@]+$')
 ```
 
+## Schema control policies
+
+Everything above describes permissioning one table at a time. A **schema control policy**
+is the guardrail over all of it, modelled on AWS's Service Control Policies: a `Policy` is
+the IAM policy, granting access on one specific resource; a schema control policy is the
+SCP, attaching to a container (schema ≈ OU), governing every resource inside it
+(table ≈ account), and never granting anything -- its only power is to refuse.
+
+```python
+from pgalchemy import schema_control_policy, ControlledTable, evaluate_control_policies
+
+@schema_control_policy(on="public")
+def rls_required(table: ControlledTable):
+    if not table.rls_enabled:
+        yield "row level security is not enabled"
+
+def test_schema_is_compliant():
+    evaluate_control_policies(Base.metadata).raise_for_status()
+```
+
+`on` names the schema(s) governed; omit it to govern every schema. The body is handed a
+`ControlledTable` and signals compliance by yielding nothing. Declaring a control policy
+registers it, so importing the module that defines one is all the wiring there is.
+
+### What a control policy receives
+
+`ControlledTable` gathers everything pgalchemy knows about one table -- RLS flags and
+policies from the registry, column privileges from `Column.info` -- into one object.
+
+| attribute | |
+|-----------|--|
+| `table`, `model`, `schema`, `name`, `qualified_name` | identity; `schema` is always spelled out, never `None` |
+| `rls`, `rls_enabled`, `rls_forced` | declared RLS state |
+| `rls_declared` | tells "explicitly off" apart from "never considered" |
+| `policies` | every `Policy` on the table |
+| `policies_for(command)` | policies covering one command, with `ALL` expanded |
+| `commands_covered` | commands some *permissive* policy grants |
+| `columns`, `column(name)`, `has_column(name)` | `ControlledColumn` per column, each with `.rules`, `.grants`, `.revocations`, `.roles` |
+| `roles` | every role named anywhere on the table |
+| `indexed(*columns)` | whether an index leads with those columns |
+
+A body may yield a string, or a `Violation` to set a severity or name a column:
+
+```python
+from pgalchemy import Violation, Severity
+
+@schema_control_policy(on=["public", "app"])
+def tenant_columns_are_indexed(table: ControlledTable):
+    if table.has_column("tenant_id") and not table.indexed("tenant_id"):
+        yield Violation("tenant_id is not indexed",
+                        severity=Severity.WARNING, column="tenant_id")
+```
+
+`Severity.ERROR` (the default) fails `raise_for_status()`; `Severity.WARNING` is reported
+through `warnings` and leaves the report passing.
+
+### Exempting a table
+
+Either on the policy, for exceptions known where it is written:
+
+```python
+@schema_control_policy(on="public", exempt=[Country, "public.alembic_version"])
+def rls_required(table): ...
+```
+
+or on the model, for exceptions that belong next to the table:
+
+```python
+from pgalchemy import schema_control_exception
+
+@schema_control_exception(rls_required, reason="public reference data, no tenant column")
+class Country(BaseModel):
+    __tablename__ = 'countries'
+```
+
+`reason` is required, and is carried into the report rather than quietly removing the
+table from the results. Pass `All.All` to exempt from every control policy. For Core
+tables, call it: `schema_control_exception(rls_required, reason="...")(my_table)`.
+
+### Reviewing what is not enforced
+
+`security_review()` returns the standing inventory of every deliberate deviation that does
+*not* fail the build -- exemptions and warnings -- as plain data, ready to snapshot. Errors
+are absent by design: they abort the run, so they can never be a state anybody has to
+review.
+
+```python
+import yaml
+from pgalchemy import security_review
+
+def test_security_exceptions_are_reviewed(snapshot):
+    snapshot.assert_match(
+        yaml.safe_dump(security_review(Base.metadata), sort_keys=False),
+        "security_review.yaml",
+    )
+```
+
+Any change to what the project excuses then shows up as a diff on that file, which is the
+thing a security team reviews:
+
+```yaml
+control_policies:
+- name: rls_required
+  schemas: [public]
+- name: tenant_columns_are_indexed
+  schemas: [public]
+exemptions:
+- table: public.alembic_version
+  policy: rls_required
+  reason: null
+  source: policy
+- table: public.countries
+  policy: rls_required
+  reason: public reference data, no tenant column
+  source: model
+warnings:
+- table: public.documents
+  column: tenant_id
+  policy: tenant_columns_are_indexed
+  message: tenant_id is not indexed
+```
+
+`source` is `model` for an exemption declared with `@schema_control_exception`, which
+always carries a `reason`, and `policy` for one listed in `exempt=`, which has no reason
+to give. Because it is data rather than prose, a team can enforce its own standard
+directly:
+
+```python
+def test_every_exemption_says_why():
+    review = security_review(Base.metadata)
+    assert [e for e in review["exemptions"] if not e["reason"]] == []
+```
+
+`control_policies` lists the policies that ran. It matters more than it looks: deleting a
+control policy silently removes every exemption against it, and without the roster that
+diff reads as risk going down rather than a check being taken away. Everything is sorted
+and nothing is padded, so a diff shows only what actually changed. Use `json.dumps` if you
+prefer JSON; the structure is plain `str`/`list`/`dict`/`None` either way.
+
+### Built-in control policies
+
+```python
+from pgalchemy.control_policies import (
+    use_recommended, rls_required, writes_require_with_check,
+)
+
+use_recommended(on="public")                                           # all of them
+use_recommended(rls_required, writes_require_with_check, on="public")  # or pick
+```
+
+| policy | catches |
+|--------|---------|
+| `rls_required` | a table with no `ENABLE ROW LEVEL SECURITY` |
+| `policies_require_rls` | policies declared on a table with RLS off -- they are never consulted |
+| `every_command_has_a_policy` | RLS on with a command left uncovered, which denies it outright |
+| `writes_require_with_check` | an `UPDATE` policy with `using` but no `with_check`, or an `INSERT` policy with no `with_check` at all |
+| `no_unconditional_using` | a permissive policy of `using (true)`, which overrides every other policy |
+| `column_privileges_are_valid` | `GRANT DELETE (col)` -- not a column privilege in PostgreSQL |
+
+`use_recommended(..., severity=Severity.WARNING)` downgrades the whole set, which is how
+to introduce these to a codebase that does not pass yet: every failure is still printed,
+but the report stays green.
+
 ## Alembic setup
 
 In `env.py`:
@@ -341,6 +505,23 @@ and views. Policies do not have this restriction.
 Without that, alembic_utils treats every entity it finds in the database as unmanaged and
 emits a drop for it -- including the policies and column grants pgalchemy just created.
 Call `pgalchemy.alembic.allow_alembic_utils_defaults()` if you want its original behaviour.
+
+### Enforcing control policies
+
+`register_entities(control_policies=True)` makes `revision --autogenerate` evaluate every
+declared schema control policy and abort on a violation, so a schema that fails its own
+guardrails never reaches a migration file:
+
+```shell
+$ alembic revision --autogenerate -m "add documents"
+SchemaControlViolation: 1 violation
+
+  public.documents  rls_required  row level security is not enabled
+```
+
+It is off by default -- a comparator that can refuse to generate anything should be asked
+for explicitly. No database is consulted, so it behaves identically in offline `--sql`
+mode.
 
 ### Available operations
 

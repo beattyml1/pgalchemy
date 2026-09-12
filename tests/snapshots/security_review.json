@@ -1,0 +1,38 @@
+{
+  "control_policies": [
+    {
+      "name": "rls_required",
+      "schemas": [
+        "public"
+      ]
+    },
+    {
+      "name": "tenant_columns_are_indexed",
+      "schemas": [
+        "public"
+      ]
+    }
+  ],
+  "exemptions": [
+    {
+      "table": "public.alembic_version",
+      "policy": "rls_required",
+      "reason": null,
+      "source": "policy"
+    },
+    {
+      "table": "public.countries",
+      "policy": "rls_required",
+      "reason": "public reference data, no tenant column",
+      "source": "model"
+    }
+  ],
+  "warnings": [
+    {
+      "table": "public.documents",
+      "column": "tenant_id",
+      "policy": "tenant_columns_are_indexed",
+      "message": "tenant_id is not indexed"
+    }
+  ]
+}
